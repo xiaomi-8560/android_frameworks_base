@@ -110,6 +110,9 @@ import dagger.Lazy;
 
 import kotlin.Unit;
 
+import java.io.FileInputStream;
+import java.io.FileWriter;
+import java.io.IOException;
 import java.io.PrintWriter;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -261,6 +264,43 @@ public class UdfpsController implements DozeReceiver, Dumpable {
         }
     };
 
+    private void startFodPressPolling() {
+        new Thread(() -> {
+            try (FileInputStream fis = new FileInputStream("/sys/class/touch/touch_dev/fod_press_status")) {
+                byte[] buffer = new byte[1];
+                while (true) {
+                    int rc = fis.read(buffer);
+                    Log.d(TAG, "fod_press_status was successfully opened");
+                    if (rc == 1) {
+                        boolean pressed = buffer[0] != '0';
+                        Log.d(TAG, "fod_press_status value" + pressed);
+                        handleFodPressStatus(pressed);
+                    }
+                    fis.getChannel().position(0); // Reset position for next read
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "Error reading fod_press_status", e);
+            }
+        }).start();
+    }
+
+    // Write the display parameter to the sysfs node
+    private void setDispParam(String value) {
+        try (FileWriter writer = new FileWriter("/sys/devices/virtual/mi_display/disp_feature/disp-DSI-0/disp_param")) {
+            Log.d(TAG, "Disp_param was able to set");
+            writer.write("9 " + value); // Local HBM setting (9 for HBM mode, 0/1 for on/off)
+        } catch (IOException e) {
+            Log.e(TAG, "Failed to set display parameter", e);
+        }
+    }
+
+    // Set the state of the FOD sensor
+    private void setFingerDown(boolean pressed) {
+        String hbmMode = pressed ? "1" : "0";
+        Log.d(TAG, "Finger down detected");
+        setDispParam(hbmMode); // Set the display parameter (local HBM mode)
+    }
+
     private static void xaiomiTouchFeature(int arg) {
         try {
             if (xaiomiTouchFeatureAidl == null) {
@@ -268,19 +308,25 @@ public class UdfpsController implements DozeReceiver, Dumpable {
                 var fqName = vendor.xiaomi.hw.touchfeature.ITouchFeature.DESCRIPTOR + "/" + name;
                 var b = android.os.Binder.allowBlocking(android.os.ServiceManager.waitForDeclaredService(fqName));
                 xaiomiTouchFeatureAidl = vendor.xiaomi.hw.touchfeature.ITouchFeature.Stub.asInterface(b);
-                
+
                 // Link to death
                 b.linkToDeath(() -> {
                     android.util.Log.w("FP-HAX", "TouchFeature binder died. Reconnecting...");
                     xaiomiTouchFeatureAidl = null;
                 }, 0);
-                
+
                 android.util.Log.d("FP-HAX", "Binded TouchFeature");
             }
             xaiomiTouchFeatureAidl.setTouchMode(0, 10, arg);
         } catch(Throwable t) {
             android.util.Log.e("FP-HAX", "TouchFeature", t);
         }
+    }
+
+    private void handleFodPressStatus(boolean pressed) {
+        Log.d(TAG, "FOD press status: " + (pressed ? "PRESSED" : "RELEASED"));
+        xiaomiFingerprintExtension(pressed ? 1 : 0);  // Trigger fingerprint extension command
+        xaiomiTouchFeature(pressed ? 1 : 0);          // Trigger touch feature based on press status
     }
 
     private static void xiaomiFingerprintExtension(int arg) {
@@ -290,13 +336,13 @@ public class UdfpsController implements DozeReceiver, Dumpable {
                 var fqName = vendor.xiaomi.hardware.fingerprintextension.IXiaomiFingerprint.DESCRIPTOR + "/" + name;
                 var b = android.os.Binder.allowBlocking(android.os.ServiceManager.waitForDeclaredService(fqName));
                 xaiomiFingerprintExtensionAidl = vendor.xiaomi.hardware.fingerprintextension.IXiaomiFingerprint.Stub.asInterface(b);
-                
+
                 // Link to death
                 b.linkToDeath(() -> {
                     android.util.Log.w("FP-HAX", "FingerprintExtension binder died. Reconnecting...");
                     xaiomiFingerprintExtensionAidl = null;
                 }, 0);
-                
+
                 android.util.Log.d("FP-HAX", "Binded FingerprintExtension");
             }
             xaiomiFingerprintExtensionAidl.extCmd(4, arg);
@@ -818,6 +864,8 @@ public class UdfpsController implements DozeReceiver, Dumpable {
 
         udfpsHapticsSimulator.setUdfpsController(this);
         udfpsShell.setUdfpsOverlayController(mUdfpsOverlayController);
+
+        startFodPressPolling();
     }
 
     /**
@@ -1116,8 +1164,9 @@ public class UdfpsController implements DozeReceiver, Dumpable {
                 }
             }
         }
-        xaiomiTouchFeature(1);
+        setFingerDown(true);
         xiaomiFingerprintExtension(1);
+        xaiomiTouchFeature(1);
 
         for (Callback cb : mCallbacks) {
             cb.onFingerDown();
@@ -1165,8 +1214,9 @@ public class UdfpsController implements DozeReceiver, Dumpable {
         unconfigureDisplay(view);
         cancelAodSendFingerUpAction();
 
-        xaiomiTouchFeature(0);
+        setFingerDown(false);
         xiaomiFingerprintExtension(0);
+        xaiomiTouchFeature(0);
 
     }
 
