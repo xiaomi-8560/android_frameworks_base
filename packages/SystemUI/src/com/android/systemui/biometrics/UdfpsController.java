@@ -43,6 +43,7 @@ import android.hardware.fingerprint.IUdfpsOverlayController;
 import android.hardware.fingerprint.IUdfpsOverlayControllerCallback;
 import android.hardware.input.InputManager;
 import android.os.Build;
+import android.os.FileObserver;
 import android.os.Handler;
 import android.os.PowerManager;
 import android.os.Trace;
@@ -215,6 +216,8 @@ public class UdfpsController implements DozeReceiver, Dumpable {
     // the user touches the sensor area again.
     private boolean mAcquiredReceived;
 
+    private FileObserver fodPressObserver;
+
     // The current request from FingerprintService. Null if no current request.
     @Nullable UdfpsControllerOverlay mOverlay;
 
@@ -265,23 +268,35 @@ public class UdfpsController implements DozeReceiver, Dumpable {
     };
 
     private void startFodPressPolling() {
-        new Thread(() -> {
-            try (FileInputStream fis = new FileInputStream("/sys/class/touch/touch_dev/fod_press_status")) {
-                byte[] buffer = new byte[1];
-                while (true) {
-                    int rc = fis.read(buffer);
-                    Log.d(TAG, "fod_press_status was successfully opened");
-                    if (rc == 1) {
-                        boolean pressed = buffer[0] != '0';
-                        Log.d(TAG, "fod_press_status value" + pressed);
-                        handleFodPressStatus(pressed);
+        fodPressObserver = new FileObserver("/sys/class/touch/touch_dev/fod_press_status", FileObserver.MODIFY) {
+            @Override
+            public void onEvent(int event, String path) {
+                if (event == FileObserver.MODIFY) {
+                    try (FileInputStream fis = new FileInputStream("/sys/class/touch/touch_dev/fod_press_status")) {
+                        byte[] buffer = new byte[1];
+                        int rc = fis.read(buffer);
+                        if (rc == 1) {
+                            boolean pressed = buffer[0] != '0';
+                            Log.d(TAG, "fod_press_status value: " + pressed);
+                            handleFodPressStatus(pressed);
+                        }
+                    } catch (Exception e) {
+                        Log.e(TAG, "Error reading fod_press_status", e);
                     }
-                    fis.getChannel().position(0); // Reset position for next read
                 }
-            } catch (Exception e) {
-                Log.e(TAG, "Error reading fod_press_status", e);
             }
-        }).start();
+        };
+
+        fodPressObserver.startWatching();
+        Log.d(TAG, "Started monitoring fod_press_status");
+    }
+
+    private void stopFodPressPolling() {
+        if (fodPressObserver != null) {
+            fodPressObserver.stopWatching();
+            fodPressObserver = null;
+            Log.d(TAG, "Stopped monitoring fod_press_status");
+        }
     }
 
     // Write the display parameter to the sysfs node
@@ -297,6 +312,7 @@ public class UdfpsController implements DozeReceiver, Dumpable {
     // Set the state of the FOD sensor
     private void setFingerDown(boolean pressed) {
         String hbmMode = pressed ? "1" : "0";
+        Log.d(TAG, "Finger " + (pressed ? "down" : "up") + " detected");
         Log.d(TAG, "Finger down detected");
         setDispParam(hbmMode); // Set the display parameter (local HBM mode)
     }
