@@ -865,7 +865,7 @@ public class UdfpsController implements DozeReceiver, Dumpable {
         udfpsHapticsSimulator.setUdfpsController(this);
         udfpsShell.setUdfpsOverlayController(mUdfpsOverlayController);
 
-        startFodPressPolling();
+//        startFodPressPolling();
     }
 
     /**
